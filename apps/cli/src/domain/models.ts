@@ -101,6 +101,13 @@ export const WorkflowConfig = Schema.Struct({
 })
 export type WorkflowConfig = Schema.Schema.Type<typeof WorkflowConfig>
 
+export const Workspace = Schema.Struct({
+  path: Schema.String,
+  workspace_key: Schema.String,
+  created_now: Schema.Boolean,
+})
+export type Workspace = Schema.Schema.Type<typeof Workspace>
+
 export const FailureDetails = Schema.Struct({
   code: Schema.String,
   message: Schema.String,

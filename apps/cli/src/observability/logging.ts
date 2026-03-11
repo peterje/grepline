@@ -47,3 +47,9 @@ export const logError = (
   fields: Readonly<Record<string, unknown>> = {},
 ): Effect.Effect<void> =>
   Effect.annotateLogs(Effect.logError(message), compactLogFields(fields))
+
+export const logWarning = (
+  message: string,
+  fields: Readonly<Record<string, unknown>> = {},
+): Effect.Effect<void> =>
+  Effect.annotateLogs(Effect.logWarning(message), compactLogFields(fields))

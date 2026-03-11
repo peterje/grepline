@@ -7,6 +7,7 @@ export * from "./observability/logging"
 export * from "./service/prompt"
 export * from "./service/shell"
 export * from "./service/tracker"
+export * from "./service/workspace"
 export * from "./service/workflow"
 
 export const program = makeProgram()

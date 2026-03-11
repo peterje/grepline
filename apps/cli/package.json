@@ -17,7 +17,7 @@
     "dev": "bun run src/bin.ts",
     "check": "tsc -p tsconfig.json --noEmit",
     "build": "tsdown",
-    "test": "vitest run --config vitest.config.ts"
+    "test": "bun test"
   },
   "dependencies": {
     "@effect/platform-bun": "^4.0.0-beta.29",

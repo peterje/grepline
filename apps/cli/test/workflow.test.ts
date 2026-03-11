@@ -2,7 +2,7 @@ import os from "node:os"
 import path from "node:path"
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 
-import { describe, expect, it } from "@effect/vitest"
+import { describe, expect, it } from "bun:test"
 import { Effect, Logger } from "effect"
 
 import { runCli } from "../src/cli"
@@ -46,27 +46,27 @@ describe("workflow config and prompting", () => {
     expect(error.code).toEqual("missing_workflow_file")
   })
 
-  it.effect("surfaces yaml parse failures", () =>
-    Effect.gen(function* () {
-      const error = yield* Effect.flip(
+  it("surfaces yaml parse failures", async () => {
+    const error = await Effect.runPromise(
+      Effect.flip(
         parseWorkflowDefinition(["---", "tracker: [", "---"].join("\n")),
-      )
+      ),
+    )
 
-      expect(error.code).toEqual("workflow_parse_error")
-    }),
-  )
+    expect(error.code).toEqual("workflow_parse_error")
+  })
 
-  it.effect("rejects non-object front matter", () =>
-    Effect.gen(function* () {
-      const error = yield* Effect.flip(
+  it("rejects non-object front matter", async () => {
+    const error = await Effect.runPromise(
+      Effect.flip(
         parseWorkflowDefinition(
           ["---", "- linear", "---", "prompt"].join("\n"),
         ),
-      )
+      ),
+    )
 
-      expect(error.code).toEqual("workflow_front_matter_not_a_map")
-    }),
-  )
+    expect(error.code).toEqual("workflow_front_matter_not_a_map")
+  })
 
   it("applies defaults and resolves env-backed config values", () => {
     const config = resolveWorkflowConfig(
@@ -110,9 +110,9 @@ describe("workflow config and prompting", () => {
     })
   })
 
-  it.effect("validates startup-critical workflow settings", () =>
-    Effect.gen(function* () {
-      const error = yield* Effect.flip(
+  it("validates startup-critical workflow settings", async () => {
+    const error = await Effect.runPromise(
+      Effect.flip(
         validateWorkflowStartupConfig(
           resolveWorkflowConfig({
             tracker: {
@@ -123,19 +123,19 @@ describe("workflow config and prompting", () => {
             },
           }),
         ),
-      )
+      ),
+    )
 
-      expect(error.code).toEqual("startup_validation_failed")
-      expect(error.details?.errors).toEqual([
-        "tracker.kind 'github' is not supported",
-        "codex.command must not be empty",
-      ])
-    }),
-  )
+    expect(error.code).toEqual("startup_validation_failed")
+    expect(error.details?.errors).toEqual([
+      "tracker.kind 'github' is not supported",
+      "codex.command must not be empty",
+    ])
+  })
 
-  it.effect("requires linear auth and project slug for dispatch", () =>
-    Effect.gen(function* () {
-      const error = yield* Effect.flip(
+  it("requires linear auth and project slug for dispatch", async () => {
+    const error = await Effect.runPromise(
+      Effect.flip(
         validateWorkflowStartupConfig(
           resolveWorkflowConfig({
             tracker: {
@@ -143,14 +143,14 @@ describe("workflow config and prompting", () => {
             },
           }),
         ),
-      )
+      ),
+    )
 
-      expect(error.details?.errors).toEqual([
-        "tracker.api_key is required for linear",
-        "tracker.project_slug is required for linear",
-      ])
-    }),
-  )
+    expect(error.details?.errors).toEqual([
+      "tracker.api_key is required for linear",
+      "tracker.project_slug is required for linear",
+    ])
+  })
 
   it("renders prompts strictly for issue and attempt", () => {
     const rendered = renderPromptTemplate(

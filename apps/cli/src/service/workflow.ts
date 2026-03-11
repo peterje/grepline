@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto"
+import { watch, type FSWatcher } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { readFile } from "node:fs/promises"
+import { readFile, stat } from "node:fs/promises"
 
 import {
   Array as Arr,
@@ -27,9 +29,11 @@ import {
   DEFAULT_TERMINAL_STATES,
   DEFAULT_WORKSPACE_DIRECTORY,
   JsonMap,
+  type OrchestratorState,
   type WorkflowConfig,
   type WorkflowDefinition,
 } from "../domain/models"
+import { logError, logInfo } from "../observability/logging"
 import { resolveWorkflowPath } from "./shell"
 
 export type LoadWorkflowDefinitionOptions = {
@@ -42,6 +46,49 @@ export type ResolveWorkflowConfigOptions = {
   readonly env?: NodeJS.ProcessEnv
   readonly home_directory?: string
   readonly temp_directory?: string
+}
+
+export type LoadValidatedWorkflowStateOptions = LoadWorkflowDefinitionOptions &
+  ResolveWorkflowConfigOptions
+
+export type WorkflowFileStamp = {
+  readonly modified_at_ms: number
+  readonly size: number
+  readonly content_hash: string
+}
+
+export type WorkflowRuntimeState = {
+  readonly workflow_path: string
+  readonly workflow: WorkflowDefinition
+  readonly workflow_config: WorkflowConfig
+  readonly file_stamp: WorkflowFileStamp
+}
+
+export type WorkflowRefreshResult =
+  | {
+      readonly _tag: "unchanged"
+      readonly workflow_state: WorkflowRuntimeState
+    }
+  | {
+      readonly _tag: "reloaded"
+      readonly workflow_state: WorkflowRuntimeState
+      readonly previous_workflow_state: WorkflowRuntimeState
+    }
+  | {
+      readonly _tag: "reload_failed"
+      readonly workflow_state: WorkflowRuntimeState
+      readonly error: StartupError
+    }
+
+export type CreateWorkflowStoreOptions = LoadValidatedWorkflowStateOptions & {
+  readonly onReload?: (result: WorkflowRefreshResult) => void
+}
+
+export type WorkflowStore = {
+  readonly current: () => WorkflowRuntimeState
+  readonly reloadIfChanged: () => Effect.Effect<WorkflowRefreshResult>
+  readonly forceReload: () => Effect.Effect<WorkflowRefreshResult>
+  readonly close: () => Effect.Effect<void>
 }
 
 const NonBlankString = Schema.String.pipe(
@@ -145,6 +192,23 @@ const parsePositiveInteger = (value: unknown, fallback: number): number => {
 
 const parseNonNegativeInteger = (value: unknown, fallback: number): number => {
   return Option.getOrElse(decodeNonNegativeInteger(value), () => fallback)
+}
+
+const hashWorkflowContent = (content: string): string => {
+  const hash = createHash("sha1")
+  hash.update(content)
+  return hash.digest("hex")
+}
+
+const workflowFileStampsEqual = (
+  left: WorkflowFileStamp,
+  right: WorkflowFileStamp,
+): boolean => {
+  return (
+    left.modified_at_ms === right.modified_at_ms &&
+    left.size === right.size &&
+    left.content_hash === right.content_hash
+  )
 }
 
 const isEnvReference = (value: string): boolean =>
@@ -321,6 +385,29 @@ export const loadWorkflowDefinition = (
   )
 }
 
+export const readWorkflowFileStamp = (
+  workflow_path: string,
+): Effect.Effect<WorkflowFileStamp, StartupError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const [fileStat, content] = await Promise.all([
+        stat(workflow_path),
+        readFile(workflow_path, "utf8"),
+      ])
+
+      return {
+        modified_at_ms: fileStat.mtimeMs,
+        size: fileStat.size,
+        content_hash: hashWorkflowContent(content),
+      }
+    },
+    catch: (cause) =>
+      startupError("missing_workflow_file", "failed to read workflow file", {
+        workflow_path,
+        cause: String(cause),
+      }),
+  })
+
 export const resolveWorkflowConfig = (
   config: JsonMap,
   options: ResolveWorkflowConfigOptions = {},
@@ -412,6 +499,245 @@ export const resolveWorkflowConfig = (
     },
   }
 }
+
+export const loadValidatedWorkflowState = (
+  options: LoadValidatedWorkflowStateOptions,
+): Effect.Effect<WorkflowRuntimeState, StartupError> =>
+  Effect.gen(function* () {
+    const loadedWorkflow = yield* loadWorkflowDefinition(options)
+    const workflow_config = resolveWorkflowConfig(
+      loadedWorkflow.workflow.config,
+      options,
+    )
+
+    yield* validateWorkflowStartupConfig(workflow_config)
+
+    const file_stamp = yield* readWorkflowFileStamp(
+      loadedWorkflow.workflow_path,
+    )
+
+    return {
+      workflow_path: loadedWorkflow.workflow_path,
+      workflow: loadedWorkflow.workflow,
+      workflow_config,
+      file_stamp,
+    }
+  })
+
+export const applyWorkflowConfigToOrchestratorState = (
+  orchestrator_state: OrchestratorState,
+  workflow_config: WorkflowConfig,
+): OrchestratorState => ({
+  ...orchestrator_state,
+  poll_interval_ms: workflow_config.polling.interval_ms,
+  max_concurrent_agents: workflow_config.agent.max_concurrent_agents,
+})
+
+const attemptWorkflowReload = (
+  currentState: WorkflowRuntimeState,
+  options: LoadValidatedWorkflowStateOptions,
+  forceReload: boolean,
+): Effect.Effect<WorkflowRefreshResult> =>
+  Effect.gen(function* () {
+    const resolvedWorkflowPath = resolveWorkflowPath(
+      options.cwd,
+      options.workflow_path,
+    )
+
+    if (!forceReload && resolvedWorkflowPath === currentState.workflow_path) {
+      const stampResult = yield* readWorkflowFileStamp(
+        currentState.workflow_path,
+      ).pipe(
+        Effect.map((stamp) =>
+          workflowFileStampsEqual(currentState.file_stamp, stamp)
+            ? ({
+                _tag: "unchanged",
+                workflow_state: currentState,
+              } as const)
+            : ({
+                _tag: "needs_reload",
+              } as const),
+        ),
+        Effect.catch((error) =>
+          Effect.succeed({
+            _tag: "reload_failed",
+            workflow_state: currentState,
+            error,
+          } as const),
+        ),
+      )
+
+      if (stampResult._tag !== "needs_reload") {
+        return stampResult
+      }
+    }
+
+    const nextState = yield* loadValidatedWorkflowState(options).pipe(
+      Effect.map(
+        (nextState) =>
+          ({
+            _tag: "loaded",
+            workflow_state: nextState,
+          }) as const,
+      ),
+      Effect.catch((error) =>
+        Effect.succeed({
+          _tag: "reload_failed",
+          workflow_state: currentState,
+          error,
+        } as const),
+      ),
+    )
+
+    if (nextState._tag === "reload_failed") {
+      return nextState
+    }
+
+    return workflowFileStampsEqual(
+      currentState.file_stamp,
+      nextState.workflow_state.file_stamp,
+    ) && currentState.workflow_path === nextState.workflow_state.workflow_path
+      ? {
+          _tag: "unchanged",
+          workflow_state: currentState,
+        }
+      : {
+          _tag: "reloaded",
+          workflow_state: nextState.workflow_state,
+          previous_workflow_state: currentState,
+        }
+  })
+
+export const reloadWorkflowState = (
+  currentState: WorkflowRuntimeState,
+  options: LoadValidatedWorkflowStateOptions,
+): Effect.Effect<WorkflowRefreshResult> =>
+  attemptWorkflowReload(currentState, options, false)
+
+export const forceReloadWorkflowState = (
+  currentState: WorkflowRuntimeState,
+  options: LoadValidatedWorkflowStateOptions,
+): Effect.Effect<WorkflowRefreshResult> =>
+  attemptWorkflowReload(currentState, options, true)
+
+const defaultWorkflowReloadLogger = (
+  result: WorkflowRefreshResult,
+): Effect.Effect<void> => {
+  switch (result._tag) {
+    case "unchanged": {
+      return Effect.void
+    }
+    case "reloaded": {
+      return logInfo("workflow reloaded", {
+        workflow_path: result.workflow_state.workflow_path,
+        poll_interval_ms:
+          result.workflow_state.workflow_config.polling.interval_ms,
+        max_concurrent_agents:
+          result.workflow_state.workflow_config.agent.max_concurrent_agents,
+      })
+    }
+    case "reload_failed": {
+      return logError(
+        "workflow reload failed; keeping last known good config",
+        {
+          workflow_path: result.workflow_state.workflow_path,
+          error_code: result.error.code,
+          error_message: result.error.message,
+          ...result.error.details,
+        },
+      )
+    }
+  }
+}
+
+export const createWorkflowStore = (
+  options: CreateWorkflowStoreOptions,
+): Effect.Effect<WorkflowStore, StartupError> =>
+  Effect.gen(function* () {
+    let workflowState = yield* loadValidatedWorkflowState(options)
+    let watcher: FSWatcher | undefined
+    let closed = false
+    let inFlightReload: Promise<WorkflowRefreshResult> | undefined
+
+    const notifyReload = (result: WorkflowRefreshResult): void => {
+      if (options.onReload !== undefined) {
+        options.onReload(result)
+      }
+
+      Effect.runFork(defaultWorkflowReloadLogger(result))
+    }
+
+    const resetWatcher = (): void => {
+      watcher?.close()
+      watcher = watch(
+        path.dirname(workflowState.workflow_path),
+        { persistent: false },
+        (_eventType, filename) => {
+          if (closed) {
+            return
+          }
+
+          const watchedFile = path.basename(workflowState.workflow_path)
+          if (
+            filename !== null &&
+            filename !== undefined &&
+            filename.toString() !== watchedFile
+          ) {
+            return
+          }
+
+          void runReload("changed")
+        },
+      )
+    }
+
+    const runReload = (
+      mode: "changed" | "force",
+    ): Promise<WorkflowRefreshResult> => {
+      if (inFlightReload !== undefined) {
+        return inFlightReload
+      }
+
+      const effect = (
+        mode === "force"
+          ? forceReloadWorkflowState(workflowState, options)
+          : reloadWorkflowState(workflowState, options)
+      ).pipe(
+        Effect.tap((result) =>
+          Effect.sync(() => {
+            if (result._tag === "reloaded") {
+              workflowState = result.workflow_state
+              resetWatcher()
+            }
+
+            notifyReload(result)
+          }),
+        ),
+        Effect.ensuring(
+          Effect.sync(() => {
+            inFlightReload = undefined
+          }),
+        ),
+      )
+
+      inFlightReload = Effect.runPromise(effect)
+      return inFlightReload
+    }
+
+    resetWatcher()
+
+    return {
+      current: () => workflowState,
+      reloadIfChanged: () => Effect.promise(() => runReload("changed")),
+      forceReload: () => Effect.promise(() => runReload("force")),
+      close: () =>
+        Effect.sync(() => {
+          closed = true
+          watcher?.close()
+          watcher = undefined
+        }),
+    }
+  })
 
 export const validateWorkflowStartupConfig = (
   config: WorkflowConfig,

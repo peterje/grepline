@@ -5,11 +5,15 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import { describe, expect, it } from "bun:test"
 import { Effect } from "effect"
 
-import type { Issue } from "../src/domain/models"
+import { makeInitialOrchestratorState, type Issue } from "../src/domain/models"
 import { renderPromptTemplate } from "../src/service/prompt"
 import {
+  applyWorkflowConfigToOrchestratorState,
+  createWorkflowStore,
   loadWorkflowDefinition,
+  loadValidatedWorkflowState,
   parseWorkflowDefinition,
+  reloadWorkflowState,
   resolveWorkflowConfig,
   validateWorkflowStartupConfig,
 } from "../src/service/workflow"
@@ -28,6 +32,54 @@ const sampleIssue: Issue = {
   blocked_by: [],
   created_at: "2026-03-10T00:00:00.000Z",
   updated_at: "2026-03-10T01:00:00.000Z",
+}
+
+const makeWorkflowContent = (
+  overrides: {
+    readonly poll_interval_ms?: number
+    readonly max_concurrent_agents?: number
+    readonly workspace_root?: string
+    readonly hook_timeout_ms?: number
+    readonly codex_command?: string
+    readonly prompt?: string
+  } = {},
+): string => {
+  return [
+    "---",
+    "tracker:",
+    "  kind: linear",
+    "  api_key: test-token",
+    "  project_slug: demo",
+    "polling:",
+    `  interval_ms: ${overrides.poll_interval_ms ?? 7000}`,
+    "workspace:",
+    `  root: ${overrides.workspace_root ?? "./tmp/workspaces"}`,
+    "hooks:",
+    `  timeout_ms: ${overrides.hook_timeout_ms ?? 45000}`,
+    "agent:",
+    `  max_concurrent_agents: ${overrides.max_concurrent_agents ?? 4}`,
+    "codex:",
+    `  command: ${overrides.codex_command ?? "codex app-server"}`,
+    "---",
+    overrides.prompt ?? "Issue {{ issue.identifier }}",
+  ].join("\n")
+}
+
+const waitFor = async (
+  predicate: () => boolean,
+  timeoutMs = 3000,
+): Promise<void> => {
+  const startedAt = Date.now()
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) {
+      return
+    }
+
+    await Bun.sleep(50)
+  }
+
+  throw new Error("timed out waiting for workflow update")
 }
 
 describe("workflow config and prompting", () => {
@@ -235,6 +287,202 @@ describe("workflow config and prompting", () => {
       expect(loaded.workflow.prompt_template).toEqual(
         "hello {{ issue.identifier }}",
       )
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it("reloads future workflow config and prompt content after a valid edit", async () => {
+    const cwd = await mkdtemp(
+      path.join(os.tmpdir(), "grepline-workflow-reload-"),
+    )
+
+    try {
+      const workflowPath = path.join(cwd, "WORKFLOW.md")
+
+      await writeFile(workflowPath, makeWorkflowContent(), { encoding: "utf8" })
+
+      const workflowState = await Effect.runPromise(
+        loadValidatedWorkflowState({ cwd }),
+      )
+
+      await writeFile(
+        workflowPath,
+        makeWorkflowContent({
+          poll_interval_ms: 9000,
+          max_concurrent_agents: 2,
+          workspace_root: "./next/workspaces",
+          hook_timeout_ms: 15000,
+          codex_command: "codex app-server --profile fast",
+          prompt: "Updated {{ issue.title }}",
+        }),
+        { encoding: "utf8" },
+      )
+
+      const result = await Effect.runPromise(
+        reloadWorkflowState(workflowState, { cwd }),
+      )
+
+      expect(result._tag).toEqual("reloaded")
+
+      if (result._tag !== "reloaded") {
+        throw new Error("expected workflow reload to succeed")
+      }
+
+      expect(result.workflow_state.workflow.prompt_template).toEqual(
+        "Updated {{ issue.title }}",
+      )
+      expect(result.workflow_state.workflow_config.workspace.root).toEqual(
+        path.join(cwd, "next", "workspaces"),
+      )
+      expect(result.workflow_state.workflow_config.hooks.timeout_ms).toEqual(
+        15_000,
+      )
+      expect(result.workflow_state.workflow_config.codex.command).toEqual(
+        "codex app-server --profile fast",
+      )
+
+      const orchestratorState = applyWorkflowConfigToOrchestratorState(
+        makeInitialOrchestratorState(),
+        result.workflow_state.workflow_config,
+      )
+
+      expect(orchestratorState.poll_interval_ms).toEqual(9000)
+      expect(orchestratorState.max_concurrent_agents).toEqual(2)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps the last known good workflow when reload validation fails", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "grepline-workflow-lkg-"))
+
+    try {
+      const workflowPath = path.join(cwd, "WORKFLOW.md")
+
+      await writeFile(workflowPath, makeWorkflowContent(), { encoding: "utf8" })
+
+      const workflowState = await Effect.runPromise(
+        loadValidatedWorkflowState({ cwd }),
+      )
+
+      await writeFile(workflowPath, ["---", "tracker: [", "---"].join("\n"), {
+        encoding: "utf8",
+      })
+
+      const result = await Effect.runPromise(
+        reloadWorkflowState(workflowState, { cwd }),
+      )
+
+      expect(result._tag).toEqual("reload_failed")
+
+      if (result._tag !== "reload_failed") {
+        throw new Error("expected workflow reload to fail")
+      }
+
+      expect(result.error.code).toEqual("workflow_parse_error")
+      expect(result.workflow_state).toEqual(workflowState)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it("watches workflow updates and preserves the last known good state", async () => {
+    const cwd = await mkdtemp(
+      path.join(os.tmpdir(), "grepline-workflow-watch-"),
+    )
+    const reloadEvents: Array<string> = []
+
+    try {
+      const workflowPath = path.join(cwd, "WORKFLOW.md")
+
+      await writeFile(workflowPath, makeWorkflowContent(), { encoding: "utf8" })
+
+      const store = await Effect.runPromise(
+        createWorkflowStore({
+          cwd,
+          onReload: (result) => {
+            reloadEvents.push(result._tag)
+          },
+        }),
+      )
+
+      try {
+        await Bun.sleep(100)
+
+        await writeFile(workflowPath, ["---", "tracker: [", "---"].join("\n"), {
+          encoding: "utf8",
+        })
+
+        await waitFor(() => reloadEvents.includes("reload_failed"))
+        expect(store.current().workflow.prompt_template).toEqual(
+          "Issue {{ issue.identifier }}",
+        )
+
+        await writeFile(
+          workflowPath,
+          makeWorkflowContent({
+            poll_interval_ms: 8100,
+            prompt: "Watched {{ issue.identifier }}",
+          }),
+          { encoding: "utf8" },
+        )
+
+        await waitFor(
+          () => store.current().workflow_config.polling.interval_ms === 8100,
+        )
+
+        expect(store.current().workflow.prompt_template).toEqual(
+          "Watched {{ issue.identifier }}",
+        )
+      } finally {
+        await Effect.runPromise(store.close())
+      }
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it("revalidates workflow state before dispatch when file watch events are missed", async () => {
+    const cwd = await mkdtemp(
+      path.join(os.tmpdir(), "grepline-workflow-dispatch-"),
+    )
+
+    try {
+      const workflowPath = path.join(cwd, "WORKFLOW.md")
+
+      await writeFile(workflowPath, makeWorkflowContent(), { encoding: "utf8" })
+
+      const store = await Effect.runPromise(createWorkflowStore({ cwd }))
+
+      try {
+        await Effect.runPromise(store.close())
+
+        await writeFile(
+          workflowPath,
+          makeWorkflowContent({
+            poll_interval_ms: 9300,
+            max_concurrent_agents: 6,
+            prompt: "Dispatch {{ issue.identifier }}",
+          }),
+          { encoding: "utf8" },
+        )
+
+        const result = await Effect.runPromise(store.reloadIfChanged())
+
+        expect(result._tag).toEqual("reloaded")
+        expect(store.current().workflow_config.polling.interval_ms).toEqual(
+          9300,
+        )
+        expect(
+          store.current().workflow_config.agent.max_concurrent_agents,
+        ).toEqual(6)
+        expect(store.current().workflow.prompt_template).toEqual(
+          "Dispatch {{ issue.identifier }}",
+        )
+      } finally {
+        await Effect.runPromise(store.close())
+      }
     } finally {
       await rm(cwd, { recursive: true, force: true })
     }

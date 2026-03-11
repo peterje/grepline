@@ -1,9 +1,17 @@
 import { Effect } from "effect"
 
 import { StartupError, startupError, type ServiceError } from "./domain/errors"
-import type { ServiceShell } from "./domain/models"
+import {
+  makeInitialOrchestratorState,
+  type ServiceShell,
+} from "./domain/models"
 import { logError, logInfo, loggingLayer } from "./observability/logging"
 import { bootstrapServiceShell } from "./service/shell"
+import {
+  loadWorkflowDefinition,
+  resolveWorkflowConfig,
+  validateWorkflowStartupConfig,
+} from "./service/workflow"
 
 export type CliOptions = {
   readonly workflow_path?: string
@@ -41,11 +49,28 @@ export const runCli = (
   Effect.gen(function* () {
     const cli = yield* parseCliOptions(argv)
     const cwd = options.cwd ?? process.cwd()
-    const serviceShell = yield* bootstrapServiceShell(
+    const loadedWorkflow = yield* loadWorkflowDefinition(
       cli.workflow_path === undefined
         ? { cwd }
         : { cwd, workflow_path: cli.workflow_path },
     )
+    const workflowConfig = resolveWorkflowConfig(
+      loadedWorkflow.workflow.config,
+      {
+        cwd,
+      },
+    )
+
+    yield* validateWorkflowStartupConfig(workflowConfig)
+
+    const serviceShell = yield* bootstrapServiceShell({
+      cwd,
+      workflow_path: loadedWorkflow.workflow_path,
+      orchestrator_state: makeInitialOrchestratorState({
+        poll_interval_ms: workflowConfig.polling.interval_ms,
+        max_concurrent_agents: workflowConfig.agent.max_concurrent_agents,
+      }),
+    })
 
     yield* logInfo("service shell ready", {
       cwd: serviceShell.cwd,

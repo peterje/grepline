@@ -35,6 +35,72 @@ export const WorkflowDefinition = Schema.Struct({
 })
 export type WorkflowDefinition = Schema.Schema.Type<typeof WorkflowDefinition>
 
+export const StateConcurrencyLimits = Schema.Record(
+  Schema.String,
+  Schema.Number,
+)
+export type StateConcurrencyLimits = Schema.Schema.Type<
+  typeof StateConcurrencyLimits
+>
+
+export const TrackerConfig = Schema.Struct({
+  kind: Schema.NullOr(Schema.String),
+  endpoint: Schema.String,
+  api_key: Schema.NullOr(Schema.String),
+  project_slug: Schema.NullOr(Schema.String),
+  active_states: Schema.Array(Schema.String),
+  terminal_states: Schema.Array(Schema.String),
+})
+export type TrackerConfig = Schema.Schema.Type<typeof TrackerConfig>
+
+export const PollingConfig = Schema.Struct({
+  interval_ms: Schema.Number,
+})
+export type PollingConfig = Schema.Schema.Type<typeof PollingConfig>
+
+export const WorkspaceConfig = Schema.Struct({
+  root: Schema.String,
+})
+export type WorkspaceConfig = Schema.Schema.Type<typeof WorkspaceConfig>
+
+export const HooksConfig = Schema.Struct({
+  after_create: Schema.NullOr(Schema.String),
+  before_run: Schema.NullOr(Schema.String),
+  after_run: Schema.NullOr(Schema.String),
+  before_remove: Schema.NullOr(Schema.String),
+  timeout_ms: Schema.Number,
+})
+export type HooksConfig = Schema.Schema.Type<typeof HooksConfig>
+
+export const AgentConfig = Schema.Struct({
+  max_concurrent_agents: Schema.Number,
+  max_turns: Schema.Number,
+  max_retry_backoff_ms: Schema.Number,
+  max_concurrent_agents_by_state: StateConcurrencyLimits,
+})
+export type AgentConfig = Schema.Schema.Type<typeof AgentConfig>
+
+export const CodexConfig = Schema.Struct({
+  command: Schema.String,
+  approval_policy: Schema.NullOr(Schema.Unknown),
+  thread_sandbox: Schema.NullOr(Schema.String),
+  turn_sandbox_policy: Schema.NullOr(JsonMap),
+  turn_timeout_ms: Schema.Number,
+  read_timeout_ms: Schema.Number,
+  stall_timeout_ms: Schema.Number,
+})
+export type CodexConfig = Schema.Schema.Type<typeof CodexConfig>
+
+export const WorkflowConfig = Schema.Struct({
+  tracker: TrackerConfig,
+  polling: PollingConfig,
+  workspace: WorkspaceConfig,
+  hooks: HooksConfig,
+  agent: AgentConfig,
+  codex: CodexConfig,
+})
+export type WorkflowConfig = Schema.Schema.Type<typeof WorkflowConfig>
+
 export const FailureDetails = Schema.Struct({
   code: Schema.String,
   message: Schema.String,
@@ -134,6 +200,25 @@ export type ServiceShell = Schema.Schema.Type<typeof ServiceShell>
 export const DEFAULT_WORKFLOW_FILE = "WORKFLOW.md"
 export const DEFAULT_POLL_INTERVAL_MS = 30_000
 export const DEFAULT_MAX_CONCURRENT_AGENTS = 10
+export const DEFAULT_LINEAR_ENDPOINT = "https://api.linear.app/graphql"
+export const DEFAULT_ACTIVE_STATES = ["Todo", "In Progress"]
+export const DEFAULT_TERMINAL_STATES = [
+  "Closed",
+  "Cancelled",
+  "Canceled",
+  "Duplicate",
+  "Done",
+]
+export const DEFAULT_WORKSPACE_DIRECTORY = "symphony_workspaces"
+export const DEFAULT_HOOK_TIMEOUT_MS = 60_000
+export const DEFAULT_MAX_TURNS = 20
+export const DEFAULT_MAX_RETRY_BACKOFF_MS = 300_000
+export const DEFAULT_CODEX_COMMAND = "codex app-server"
+export const DEFAULT_CODEX_TURN_TIMEOUT_MS = 3_600_000
+export const DEFAULT_CODEX_READ_TIMEOUT_MS = 5_000
+export const DEFAULT_CODEX_STALL_TIMEOUT_MS = 300_000
+export const DEFAULT_WORKFLOW_PROMPT =
+  "You are working on an issue from Linear."
 
 export const sanitizeWorkspaceKey = (issueIdentifier: string): string =>
   issueIdentifier.replaceAll(/[^A-Za-z0-9._-]/g, "_")

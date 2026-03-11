@@ -10,6 +10,8 @@ export type StartupErrorCode =
   | "startup_validation_failed"
 
 export type RuntimeErrorCode =
+  | "template_parse_error"
+  | "template_render_error"
   | "runtime_invariant_violation"
   | "workspace_operation_failed"
   | "tracker_request_failed"

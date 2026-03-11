@@ -1,4 +1,6 @@
 import path from "node:path"
+import os from "node:os"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Logger } from "effect"
@@ -29,18 +31,46 @@ describe("service shell", () => {
     }),
   )
 
-  it.effect("resolves a custom workflow path through the cli", () =>
-    Effect.gen(function* () {
-      const cwd = "/repo/project"
-      const shell = yield* runCli(["./config/TEAM_WORKFLOW.md"], { cwd }).pipe(
-        Effect.provide(silentLogger),
+  it("resolves a custom workflow path through the cli", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "grepline-cli-"))
+
+    try {
+      const workflowPath = path.join(cwd, "config", "TEAM_WORKFLOW.md")
+
+      await mkdir(path.dirname(workflowPath), { recursive: true })
+      await writeFile(
+        workflowPath,
+        [
+          "---",
+          "tracker:",
+          "  kind: linear",
+          "  api_key: test-token",
+          "  project_slug: demo",
+          "polling:",
+          "  interval_ms: 5000",
+          "agent:",
+          "  max_concurrent_agents: 3",
+          "---",
+          "hello {{ issue.identifier }}",
+        ].join("\n"),
+        { encoding: "utf8" },
+      )
+
+      const shell = await Effect.runPromise(
+        runCli(["./config/TEAM_WORKFLOW.md"], {
+          cwd,
+        }).pipe(Effect.provide(silentLogger)),
       )
 
       expect(shell.workflow_path).toEqual(
         path.resolve(cwd, "./config/TEAM_WORKFLOW.md"),
       )
-    }),
-  )
+      expect(shell.orchestrator_state.poll_interval_ms).toEqual(5000)
+      expect(shell.orchestrator_state.max_concurrent_agents).toEqual(3)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
 
   it.effect("rejects extra cli arguments", () =>
     Effect.gen(function* () {

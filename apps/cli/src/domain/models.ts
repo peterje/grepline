@@ -201,6 +201,8 @@ export const DEFAULT_WORKFLOW_FILE = "WORKFLOW.md"
 export const DEFAULT_POLL_INTERVAL_MS = 30_000
 export const DEFAULT_MAX_CONCURRENT_AGENTS = 10
 export const DEFAULT_LINEAR_ENDPOINT = "https://api.linear.app/graphql"
+export const DEFAULT_LINEAR_PAGE_SIZE = 50
+export const DEFAULT_LINEAR_TIMEOUT_MS = 30_000
 export const DEFAULT_ACTIVE_STATES = ["Todo", "In Progress"]
 export const DEFAULT_TERMINAL_STATES = [
   "Closed",

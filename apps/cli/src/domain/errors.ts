@@ -18,6 +18,16 @@ export type RuntimeErrorCode =
   | "agent_process_failed"
   | "unexpected_runtime_error"
 
+export type TrackerAdapterErrorCode =
+  | "unsupported_tracker_kind"
+  | "missing_tracker_api_key"
+  | "missing_tracker_project_slug"
+  | "linear_api_request"
+  | "linear_api_status"
+  | "linear_graphql_errors"
+  | "linear_unknown_payload"
+  | "linear_missing_end_cursor"
+
 type ServiceErrorShape<Code extends string> = {
   readonly code: Code
   readonly message: string
@@ -32,6 +42,10 @@ export class RuntimeError extends Data.TaggedError("RuntimeError")<
   ServiceErrorShape<RuntimeErrorCode>
 > {}
 
+export class TrackerAdapterError extends Data.TaggedError(
+  "TrackerAdapterError",
+)<ServiceErrorShape<TrackerAdapterErrorCode>> {}
+
 export type ServiceError = StartupError | RuntimeError
 
 export const startupError = (
@@ -45,3 +59,9 @@ export const runtimeError = (
   message: string,
   details?: ErrorDetails,
 ): RuntimeError => new RuntimeError({ code, message, details })
+
+export const trackerAdapterError = (
+  code: TrackerAdapterErrorCode,
+  message: string,
+  details?: ErrorDetails,
+): TrackerAdapterError => new TrackerAdapterError({ code, message, details })

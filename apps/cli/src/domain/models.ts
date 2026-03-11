@@ -223,11 +223,32 @@ export const DEFAULT_HOOK_TIMEOUT_MS = 60_000
 export const DEFAULT_MAX_TURNS = 20
 export const DEFAULT_MAX_RETRY_BACKOFF_MS = 300_000
 export const DEFAULT_CODEX_COMMAND = "codex app-server"
+export const DEFAULT_CODEX_APPROVAL_POLICY = {
+  reject: {
+    sandbox_approval: true,
+    rules: true,
+    mcp_elicitations: true,
+  },
+} as const
+export const DEFAULT_CODEX_THREAD_SANDBOX = "workspace-write"
 export const DEFAULT_CODEX_TURN_TIMEOUT_MS = 3_600_000
 export const DEFAULT_CODEX_READ_TIMEOUT_MS = 5_000
 export const DEFAULT_CODEX_STALL_TIMEOUT_MS = 300_000
 export const DEFAULT_WORKFLOW_PROMPT =
   "You are working on an issue from Linear."
+
+export const makeDefaultCodexTurnSandboxPolicy = (
+  workspacePath: string,
+): JsonMap => ({
+  type: "workspaceWrite",
+  writableRoots: [workspacePath],
+  readOnlyAccess: {
+    type: "fullAccess",
+  },
+  networkAccess: false,
+  excludeTmpdirEnvVar: false,
+  excludeSlashTmp: false,
+})
 
 export const sanitizeWorkspaceKey = (issueIdentifier: string): string =>
   issueIdentifier.replaceAll(/[^A-Za-z0-9._-]/g, "_")

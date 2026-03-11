@@ -5,12 +5,12 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { describe, expect, it } from "bun:test"
 import { Effect, Logger } from "effect"
 
-import { parseCliOptions, runCli } from "../src/cli"
 import { DEFAULT_WORKFLOW_FILE } from "../src/domain/models"
 import {
   bootstrapServiceShell,
   resolveWorkflowPath,
 } from "../src/service/shell"
+import { runCliForTest } from "./cli-harness"
 
 const silentLogger = Logger.layer([Logger.make(() => undefined)])
 
@@ -57,9 +57,9 @@ describe("service shell", () => {
       )
 
       const shell = await Effect.runPromise(
-        runCli(["./config/TEAM_WORKFLOW.md"], {
+        runCliForTest(["./config/TEAM_WORKFLOW.md"], {
           cwd,
-        }).pipe(Effect.provide(silentLogger)),
+        }),
       )
 
       expect(shell.workflow_path).toEqual(
@@ -74,10 +74,12 @@ describe("service shell", () => {
 
   it("rejects extra cli arguments", async () => {
     const error = await Effect.runPromise(
-      Effect.flip(parseCliOptions(["one.md", "two.md"])),
+      Effect.flip(runCliForTest(["one.md", "two.md"])),
     )
 
-    expect(error.code).toEqual("invalid_cli_arguments")
+    expect(error).toMatchObject({
+      code: "invalid_cli_arguments",
+    })
   })
 
   it("resolves relative and default workflow paths", () => {

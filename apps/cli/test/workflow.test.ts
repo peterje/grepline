@@ -3,9 +3,8 @@ import path from "node:path"
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 
 import { describe, expect, it } from "bun:test"
-import { Effect, Logger } from "effect"
+import { Effect } from "effect"
 
-import { runCli } from "../src/cli"
 import type { Issue } from "../src/domain/models"
 import { renderPromptTemplate } from "../src/service/prompt"
 import {
@@ -14,8 +13,7 @@ import {
   resolveWorkflowConfig,
   validateWorkflowStartupConfig,
 } from "../src/service/workflow"
-
-const silentLogger = Logger.layer([Logger.make(() => undefined)])
+import { runCliForTest } from "./cli-harness"
 
 const sampleIssue: Issue = {
   id: "issue-1",
@@ -281,9 +279,7 @@ describe("workflow config and prompting", () => {
         { encoding: "utf8" },
       )
 
-      const shell = await Effect.runPromise(
-        runCli([], { cwd }).pipe(Effect.provide(silentLogger)),
-      )
+      const shell = await Effect.runPromise(runCliForTest([], { cwd }))
       const loaded = await Effect.runPromise(loadWorkflowDefinition({ cwd }))
       const config = resolveWorkflowConfig(loaded.workflow.config, { cwd })
       await Effect.runPromise(validateWorkflowStartupConfig(config))

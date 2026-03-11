@@ -1,6 +1,7 @@
 import { Effect } from "effect"
+import { Argument, Command } from "effect/unstable/cli"
 
-import { StartupError, startupError, type ServiceError } from "./domain/errors"
+import { startupError, type ServiceError } from "./domain/errors"
 import {
   makeInitialOrchestratorState,
   type ServiceShell,
@@ -21,33 +22,18 @@ export type RunCliOptions = {
   readonly cwd?: string
 }
 
-export const parseCliOptions = (
-  argv: ReadonlyArray<string>,
-): Effect.Effect<CliOptions, StartupError> => {
-  const flags = argv.filter((arg) => arg.startsWith("-"))
-  const positionals = argv.filter((arg) => !arg.startsWith("-"))
+export const CLI_VERSION = "0.0.0"
 
-  if (flags.length > 0 || positionals.length > 1) {
-    return Effect.fail(
-      startupError(
-        "invalid_cli_arguments",
-        "expected at most one optional workflow path argument",
-        { argv },
-      ),
-    )
-  }
+const workflowPathArgument = Argument.string("workflow-path").pipe(
+  Argument.withDescription("Path to the workflow file"),
+  Argument.variadic(),
+)
 
-  return Effect.succeed(
-    positionals[0] === undefined ? {} : { workflow_path: positionals[0] },
-  )
-}
-
-export const runCli = (
-  argv: ReadonlyArray<string>,
+const initializeServiceShell = (
+  cli: CliOptions,
   options: RunCliOptions = {},
 ): Effect.Effect<ServiceShell, ServiceError> =>
   Effect.gen(function* () {
-    const cli = yield* parseCliOptions(argv)
     const cwd = options.cwd ?? process.cwd()
     const loadedWorkflow = yield* loadWorkflowDefinition(
       cli.workflow_path === undefined
@@ -89,8 +75,68 @@ export const runCli = (
     ),
   )
 
-export const makeProgram = (
-  argv: ReadonlyArray<string> = Bun.argv.slice(2),
+export const makeCliCommand = (
   options: RunCliOptions = {},
-): Effect.Effect<void, ServiceError> =>
-  runCli(argv, options).pipe(Effect.asVoid, Effect.provide(loggingLayer))
+  onServiceShell?: (serviceShell: ServiceShell) => Effect.Effect<void>,
+) =>
+  Command.make("grepline", {
+    workflow_path: workflowPathArgument,
+  }).pipe(
+    Command.withDescription("Start the grepline service shell"),
+    Command.withHandler(({ workflow_path: workflowPaths }) =>
+      Effect.gen(function* () {
+        if (workflowPaths.length > 1) {
+          return yield* startupError(
+            "invalid_cli_arguments",
+            "expected at most one optional workflow path argument",
+            { argv: workflowPaths },
+          )
+        }
+
+        return yield* initializeServiceShell(
+          workflowPaths[0] === undefined
+            ? {}
+            : { workflow_path: workflowPaths[0] },
+          options,
+        )
+      }).pipe(
+        Effect.tap((serviceShell) =>
+          onServiceShell === undefined
+            ? Effect.void
+            : onServiceShell(serviceShell),
+        ),
+      ),
+    ),
+  )
+
+export const runCli = (
+  argv: ReadonlyArray<string>,
+  options: RunCliOptions = {},
+) =>
+  Effect.gen(function* () {
+    let serviceShell: ServiceShell | undefined
+
+    yield* Command.runWith(
+      makeCliCommand(options, (nextServiceShell) =>
+        Effect.sync(() => {
+          serviceShell = nextServiceShell
+        }),
+      ),
+      {
+        version: CLI_VERSION,
+      },
+    )(argv)
+
+    if (serviceShell === undefined) {
+      return yield* Effect.die(
+        "cli completed without producing a service shell",
+      )
+    }
+
+    return serviceShell
+  })
+
+export const makeProgram = (options: RunCliOptions = {}) =>
+  Command.run(makeCliCommand(options), {
+    version: CLI_VERSION,
+  }).pipe(Effect.provide(loggingLayer))

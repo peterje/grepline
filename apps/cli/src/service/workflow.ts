@@ -2,7 +2,14 @@ import os from "node:os"
 import path from "node:path"
 import { readFile } from "node:fs/promises"
 
-import { Effect } from "effect"
+import {
+  Array as Arr,
+  Effect,
+  Option,
+  Predicate,
+  Schema,
+  SchemaTransformation,
+} from "effect"
 
 import { StartupError, startupError } from "../domain/errors"
 import {
@@ -18,9 +25,8 @@ import {
   DEFAULT_MAX_TURNS,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_TERMINAL_STATES,
-  DEFAULT_WORKFLOW_FILE,
   DEFAULT_WORKSPACE_DIRECTORY,
-  type JsonMap,
+  JsonMap,
   type WorkflowConfig,
   type WorkflowDefinition,
 } from "../domain/models"
@@ -38,28 +44,30 @@ export type ResolveWorkflowConfigOptions = {
   readonly temp_directory?: string
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value)
+const NonBlankString = Schema.String.pipe(
+  Schema.decode(SchemaTransformation.trim()),
+  Schema.check(Schema.isNonEmpty()),
+)
 
-const toJsonMap = (value: Record<string, unknown>): JsonMap =>
-  Object.fromEntries(Object.entries(value))
+const IntegerLike = Schema.Union([
+  Schema.Int,
+  Schema.NumberFromString.pipe(Schema.check(Schema.isInt())),
+])
 
-const normalizeKeys = (value: unknown): unknown => {
-  if (Array.isArray(value)) {
-    return value.map((entry) => normalizeKeys(entry))
-  }
+const PositiveInteger = IntegerLike.pipe(Schema.check(Schema.isGreaterThan(0)))
 
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, nested]) => [
-        key,
-        normalizeKeys(nested),
-      ]),
-    )
-  }
+const NonNegativeInteger = IntegerLike.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+)
 
-  return value
-}
+const decodeJsonMap = Schema.decodeUnknownOption(JsonMap)
+const decodeString = Schema.decodeUnknownOption(Schema.String)
+const decodeUnknownArray = Schema.decodeUnknownOption(
+  Schema.Array(Schema.Unknown),
+)
+const decodeNonBlankString = Schema.decodeUnknownOption(NonBlankString)
+const decodePositiveInteger = Schema.decodeUnknownOption(PositiveInteger)
+const decodeNonNegativeInteger = Schema.decodeUnknownOption(NonNegativeInteger)
 
 const splitWorkflowContent = (
   content: string,
@@ -97,57 +105,46 @@ const splitWorkflowContent = (
 }
 
 const readString = (value: unknown): string | undefined =>
-  typeof value === "string" ? value : undefined
+  Option.match(decodeString(value), {
+    onNone: () => undefined,
+    onSome: (string) => string,
+  })
 
 const readNonBlankString = (value: unknown): string | null => {
-  if (typeof value !== "string") {
-    return null
-  }
-
-  const normalized = value.trim()
-  return normalized === "" ? null : normalized
+  return Option.match(decodeNonBlankString(value), {
+    onNone: () => null,
+    onSome: (string) => string,
+  })
 }
 
 const readOptionalString = (value: unknown): string | null =>
-  typeof value === "string" ? value : null
+  Option.match(decodeString(value), {
+    onNone: () => null,
+    onSome: (string) => string,
+  })
 
-const readObject = (value: unknown): Record<string, unknown> =>
-  isRecord(value) ? value : {}
+const readJsonMap = (value: unknown): JsonMap =>
+  Option.getOrElse(decodeJsonMap(value), () => ({}))
 
 const readStringArray = (
   value: unknown,
   fallback: ReadonlyArray<string>,
 ): Array<string> => {
-  if (!Array.isArray(value)) {
-    return [...fallback]
-  }
-
-  const items = value.filter(
-    (entry): entry is string => typeof entry === "string",
-  )
-  return items.length > 0 ? items : [...fallback]
-}
-
-const parseInteger = (value: unknown): number | undefined => {
-  if (typeof value === "number" && Number.isInteger(value)) {
-    return value
-  }
-
-  if (typeof value === "string" && /^-?\d+$/.test(value.trim())) {
-    return Number.parseInt(value.trim(), 10)
-  }
-
-  return undefined
+  return Option.match(decodeUnknownArray(value), {
+    onNone: () => [...fallback],
+    onSome: (entries) => {
+      const items = Arr.filter(entries, Predicate.isString)
+      return items.length === 0 ? [...fallback] : items
+    },
+  })
 }
 
 const parsePositiveInteger = (value: unknown, fallback: number): number => {
-  const parsed = parseInteger(value)
-  return parsed !== undefined && parsed > 0 ? parsed : fallback
+  return Option.getOrElse(decodePositiveInteger(value), () => fallback)
 }
 
 const parseNonNegativeInteger = (value: unknown, fallback: number): number => {
-  const parsed = parseInteger(value)
-  return parsed !== undefined && parsed >= 0 ? parsed : fallback
+  return Option.getOrElse(decodeNonNegativeInteger(value), () => fallback)
 }
 
 const isEnvReference = (value: string): boolean =>
@@ -228,26 +225,24 @@ const resolveWorkspaceRoot = (
 }
 
 const normalizeStateLimits = (value: unknown): Record<string, number> => {
-  if (!isRecord(value)) {
-    return {}
-  }
+  return Option.match(decodeJsonMap(value), {
+    onNone: () => ({}),
+    onSome: (limits) =>
+      Object.fromEntries(
+        Object.entries(limits).flatMap(([state, limit]) => {
+          const normalizedState = state.trim().toLowerCase()
 
-  return Object.fromEntries(
-    Object.entries(value).flatMap(([state, limit]) => {
-      const normalizedState = state.trim().toLowerCase()
-      const parsedLimit = parseInteger(limit)
+          if (normalizedState === "") {
+            return []
+          }
 
-      if (
-        normalizedState === "" ||
-        parsedLimit === undefined ||
-        parsedLimit <= 0
-      ) {
-        return []
-      }
-
-      return [[normalizedState, parsedLimit] as const]
-    }),
-  )
+          return Option.match(decodePositiveInteger(limit), {
+            onNone: () => [],
+            onSome: (parsedLimit) => [[normalizedState, parsedLimit] as const],
+          })
+        }),
+      ),
+  })
 }
 
 export const parseWorkflowDefinition = (
@@ -256,24 +251,21 @@ export const parseWorkflowDefinition = (
   Effect.try({
     try: () => {
       const { frontMatter, promptBody } = splitWorkflowContent(content)
-
-      if (frontMatter.trim() === "") {
-        return {
-          config: {},
-          prompt_template: promptBody.trim(),
-        }
-      }
-
-      const parsed = normalizeKeys(Bun.YAML.parse(frontMatter))
-      if (!isRecord(parsed)) {
-        throw startupError(
-          "workflow_front_matter_not_a_map",
-          "workflow front matter must decode to an object",
-        )
-      }
+      const config =
+        frontMatter.trim() === ""
+          ? {}
+          : Option.match(decodeJsonMap(Bun.YAML.parse(frontMatter)), {
+              onNone: () => {
+                throw startupError(
+                  "workflow_front_matter_not_a_map",
+                  "workflow front matter must decode to an object",
+                )
+              },
+              onSome: (parsed) => parsed,
+            })
 
       return {
-        config: toJsonMap(parsed),
+        config,
         prompt_template: promptBody.trim(),
       }
     },
@@ -301,35 +293,32 @@ export const loadWorkflowDefinition = (
 > => {
   const workflow_path = resolveWorkflowPath(options.cwd, options.workflow_path)
 
-  return Effect.gen(function* () {
-    const content = yield* Effect.tryPromise({
-      try: () => readFile(workflow_path, "utf8"),
-      catch: (cause) =>
-        startupError("missing_workflow_file", "failed to read workflow file", {
-          workflow_path,
-          cause: String(cause),
-        }),
-    })
-    const workflow = yield* parseWorkflowDefinition(content).pipe(
-      Effect.mapError((error) =>
-        error.code === "workflow_parse_error"
+  return Effect.tryPromise({
+    try: () => readFile(workflow_path, "utf8"),
+    catch: (cause) =>
+      startupError("missing_workflow_file", "failed to read workflow file", {
+        workflow_path,
+        cause: String(cause),
+      }),
+  }).pipe(
+    Effect.flatMap((content) => parseWorkflowDefinition(content)),
+    Effect.mapError((error) =>
+      error.code === "workflow_parse_error"
+        ? startupError(error.code, error.message, {
+            ...error.details,
+            workflow_path,
+          })
+        : error.code === "workflow_front_matter_not_a_map"
           ? startupError(error.code, error.message, {
-              ...error.details,
               workflow_path,
             })
-          : error.code === "workflow_front_matter_not_a_map"
-            ? startupError(error.code, error.message, {
-                workflow_path,
-              })
-            : error,
-      ),
-    )
-
-    return {
+          : error,
+    ),
+    Effect.map((workflow) => ({
       workflow_path,
       workflow,
-    }
-  })
+    })),
+  )
 }
 
 export const resolveWorkflowConfig = (
@@ -343,13 +332,13 @@ export const resolveWorkflowConfig = (
     temp_directory: options.temp_directory ?? os.tmpdir(),
   }
 
-  const normalized = readObject(normalizeKeys(config))
-  const tracker = readObject(normalized.tracker)
-  const polling = readObject(normalized.polling)
-  const workspace = readObject(normalized.workspace)
-  const hooks = readObject(normalized.hooks)
-  const agent = readObject(normalized.agent)
-  const codex = readObject(normalized.codex)
+  const normalized = readJsonMap(config)
+  const tracker = readJsonMap(normalized.tracker)
+  const polling = readJsonMap(normalized.polling)
+  const workspace = readJsonMap(normalized.workspace)
+  const hooks = readJsonMap(normalized.hooks)
+  const agent = readJsonMap(normalized.agent)
+  const codex = readJsonMap(normalized.codex)
   const turnSandboxPolicy = codex.turn_sandbox_policy
 
   return {
@@ -404,9 +393,10 @@ export const resolveWorkflowConfig = (
       command: readString(codex.command) ?? DEFAULT_CODEX_COMMAND,
       approval_policy: codex.approval_policy ?? null,
       thread_sandbox: readNonBlankString(codex.thread_sandbox),
-      turn_sandbox_policy: isRecord(turnSandboxPolicy)
-        ? toJsonMap(normalizeKeys(turnSandboxPolicy) as Record<string, unknown>)
-        : null,
+      turn_sandbox_policy: Option.getOrElse(
+        decodeJsonMap(turnSandboxPolicy),
+        () => null,
+      ),
       turn_timeout_ms: parsePositiveInteger(
         codex.turn_timeout_ms,
         DEFAULT_CODEX_TURN_TIMEOUT_MS,
@@ -426,28 +416,25 @@ export const resolveWorkflowConfig = (
 export const validateWorkflowStartupConfig = (
   config: WorkflowConfig,
 ): Effect.Effect<void, StartupError> => {
-  const errors: Array<string> = []
-
-  if (config.tracker.kind === null) {
-    errors.push("tracker.kind is required")
-  } else if (config.tracker.kind !== "linear") {
-    errors.push(`tracker.kind '${config.tracker.kind}' is not supported`)
-  }
-
-  if (config.tracker.kind === "linear" && config.tracker.api_key === null) {
-    errors.push("tracker.api_key is required for linear")
-  }
-
-  if (
-    config.tracker.kind === "linear" &&
-    config.tracker.project_slug === null
-  ) {
-    errors.push("tracker.project_slug is required for linear")
-  }
-
-  if (config.codex.command.trim() === "") {
-    errors.push("codex.command must not be empty")
-  }
+  const errors = Arr.filter(
+    [
+      config.tracker.kind === null
+        ? "tracker.kind is required"
+        : config.tracker.kind !== "linear"
+          ? `tracker.kind '${config.tracker.kind}' is not supported`
+          : null,
+      config.tracker.kind === "linear" && config.tracker.api_key === null
+        ? "tracker.api_key is required for linear"
+        : null,
+      config.tracker.kind === "linear" && config.tracker.project_slug === null
+        ? "tracker.project_slug is required for linear"
+        : null,
+      config.codex.command.trim() === ""
+        ? "codex.command must not be empty"
+        : null,
+    ],
+    Predicate.isNotNull,
+  )
 
   return errors.length === 0
     ? Effect.void

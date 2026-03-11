@@ -1,11 +1,9 @@
-import { BunServices } from "@effect/platform-bun"
-import { Console, Effect } from "effect"
-import { Command } from "effect/unstable/cli"
+import { makeProgram } from "./cli"
 
-export const cli = Command.make("grepline", {}, () =>
-  Console.log("Hello, world!"),
-).pipe(Command.withDescription("Print a hello world greeting"))
+export * from "./cli"
+export * from "./domain/errors"
+export * from "./domain/models"
+export * from "./observability/logging"
+export * from "./service/shell"
 
-export const program = Command.run(cli, { version: "0.0.0" }).pipe(
-  Effect.provide(BunServices.layer),
-)
+export const program = makeProgram()
